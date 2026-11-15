@@ -99,6 +99,17 @@ input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
 .small{width:76px!important}
 header a{color:var(--accent);font-weight:600}
 footer{color:var(--muted);font-size:12.5px}
+/* timer */
+.timer{grid-template-columns:auto 1fr;align-items:center;gap:12px 24px}
+.tmbox{display:grid;gap:2px;justify-items:start}
+.tmval{font-family:var(--mono);font-weight:700;font-size:48px;line-height:1;font-variant-numeric:tabular-nums}
+.tmval.done{color:var(--accent)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:var(--soft);padding:7px 12px;font-weight:600}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+#tmGo{background:var(--accent);color:var(--accent-ink);border:0;border-radius:8px;padding:8px 18px;font-weight:700;min-width:90px}
+.tmctl{display:grid;gap:10px;min-width:0}
+@media (max-width:560px){.timer{grid-template-columns:1fr}}
 @media (max-width:560px){.transport{grid-template-columns:1fr}.bpm{font-size:54px}}
 @media (prefers-reduced-motion:reduce){.light{transition:none}}
 </style>
@@ -126,6 +137,25 @@ footer{color:var(--muted);font-size:12.5px}
       <button id="play" aria-pressed="false">Play</button>
       <div class="lights" aria-hidden="true"><div class="light one"></div><div class="light"></div><div class="light"></div><div class="light"></div></div>
       <div class="status" id="status" aria-live="polite">Stopped</div>
+    </div>
+  </section>
+
+  <section class="panel timer" aria-label="Timer and stopwatch">
+    <div class="tmbox">
+      <span class="label" id="tmLabel">Timer</span>
+      <div class="tmval" id="tmVal" aria-live="off">1:00</div>
+    </div>
+    <div class="tmctl">
+      <div class="btnrow" style="align-items:center">
+        <div class="seg" role="group" aria-label="Mode"><button id="tmCd">Timer</button><button id="tmSw">Stopwatch</button></div>
+        <button id="tmGo">Start</button><button class="btn" id="tmReset">Reset</button>
+      </div>
+      <div class="btnrow" id="tmPresets">
+        <button class="btn" data-s="60">1 min</button><button class="btn" data-s="120">2 min</button>
+        <button class="btn" data-s="300">5 min</button><button class="btn" data-s="600">10 min</button>
+        <button class="btn" data-d="-30">−30 s</button><button class="btn" data-d="30">+30 s</button>
+      </div>
+      <label class="chk" style="font-size:14px"><input type="checkbox" id="tmLink"> Drums start and stop with it</label>
     </div>
   </section>
 
@@ -402,6 +432,43 @@ document.addEventListener("keydown",e=>{
   e.preventDefault(); P.timer?stop():start();
 });
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden&&P.timer&&!wake){try{navigator.wakeLock.request("screen").then(w=>wake=w).catch(()=>{});}catch(e){}} });
+
+/* ---------- timer / stopwatch ---------- */
+const TM={run:false,t0:0,acc:0,raf:0,done:false};
+if(!["cd","sw"].includes(S.tmMode)) S.tmMode="cd";
+S.tmSet=clamp(Math.round(+S.tmSet)||60,10,5940); S.tmLink=!!S.tmLink;
+try{const q=new URLSearchParams(location.search); const t=Math.round(+q.get("timer"));
+  if(t>=10&&t<=5940){S.tmMode="cd";S.tmSet=t;} if(q.get("stopwatch")==="1") S.tmMode="sw";}catch(e){}
+const tfmt=x=>{x=Math.max(0,x);const m=Math.floor(x/60),s=Math.floor(x%60);return m+":"+String(s).padStart(2,"0");};
+const elapsed=()=>TM.acc+(TM.run?(performance.now()-TM.t0)/1000:0);
+function drawTm(){
+  const e=elapsed(), cd=S.tmMode==="cd";
+  $("tmVal").textContent=cd?tfmt(Math.ceil(S.tmSet-e-1e-6)):tfmt(e);
+  $("tmVal").classList.toggle("done",TM.done);
+  $("tmLabel").textContent=TM.done?"Time's up":cd?"Timer":"Stopwatch";
+  $("tmGo").textContent=TM.run?"Pause":(TM.acc>0&&!TM.done?"Resume":"Start");
+  $("tmCd").setAttribute("aria-pressed",cd); $("tmSw").setAttribute("aria-pressed",!cd);
+  $("tmPresets").style.display=cd?"":"none"; $("tmLink").checked=S.tmLink;
+}
+function beep(){ if(!ctx) initAudio(); ctx.resume(); const t=ctx.currentTime;
+  for(let i=0;i<3;i++){const o=ctx.createOscillator();o.type="sine";o.frequency.value=1320;
+    const g=env(t+i*0.3,0.6,0.22,master);o.connect(g);o.start(t+i*0.3);o.stop(t+i*0.3+0.25);} }
+function tmLoop(){ if(!TM.run) return;
+  if(S.tmMode==="cd"&&elapsed()>=S.tmSet){ TM.acc=S.tmSet; TM.run=false; TM.done=true;
+    if(S.tmLink&&P.timer) stop(); beep(); drawTm(); return; }
+  drawTm(); TM.raf=requestAnimationFrame(tmLoop); }
+function tmStart(){ if(TM.done) tmReset(); if(!ctx) initAudio(); ctx.resume();
+  TM.run=true; TM.t0=performance.now(); if(S.tmLink&&!P.timer) start(); drawTm(); tmLoop(); }
+function tmPause(){ TM.acc=elapsed(); TM.run=false; cancelAnimationFrame(TM.raf); if(S.tmLink&&P.timer) stop(); drawTm(); }
+function tmReset(){ TM.run=false; TM.acc=0; TM.done=false; cancelAnimationFrame(TM.raf); drawTm(); }
+$("tmGo").onclick=()=>TM.run?tmPause():tmStart();
+$("tmReset").onclick=()=>{ if(TM.run&&S.tmLink&&P.timer) stop(); tmReset(); };
+$("tmCd").onclick=()=>{S.tmMode="cd";tmReset();save();};
+$("tmSw").onclick=()=>{S.tmMode="sw";tmReset();save();};
+$("tmLink").onchange=e=>{S.tmLink=e.target.checked;save();};
+$("tmPresets").onclick=e=>{const b=e.target.closest("button"); if(!b) return;
+  S.tmSet=clamp(b.dataset.s?+b.dataset.s:S.tmSet+(+b.dataset.d),10,5940); tmReset(); save();};
+drawTm();
 
 /* ---------- track player ---------- */
 const TK={list:[],cur:null,mode:"el",buf:null,src:null,t0:0,off:0,playing:false,url:null,dbh:null,gain:null,drag:false};
