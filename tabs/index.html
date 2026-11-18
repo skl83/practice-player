@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab Player</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #dcdad4;
+    --accent: #2f6fde; --accent-ink: #ffffff; --sel: rgba(47,111,222,.16); --cursor: rgba(47,111,222,.75);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 8px 12px;
+           background: var(--panel); border-bottom: 1px solid var(--line); position: relative; z-index: 2; }
+  .grp { display: flex; align-items: center; gap: 6px; }
+  button, select, input[type=number] { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 5px 9px; min-height: 32px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); min-width: 74px; font-weight: 600; }
+  button.on { background: var(--sel); border-color: var(--accent); }
+  input[type=number] { width: 56px; }
+  input[type=range] { width: 110px; accent-color: var(--accent); }
+  label { color: var(--muted); white-space: nowrap; }
+  #speedVal { min-width: 40px; display: inline-block; font-variant-numeric: tabular-nums; }
+  #time { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 84px; }
+  #status { color: var(--muted); font-size: 12px; }
+  #viewport { flex: 1; overflow: auto; position: relative; background: #fff; }
+  #at { min-height: 100%; }
+  #drop { display: none; position: fixed; inset: 0; background: rgba(47,111,222,.12); border: 3px dashed var(--accent);
+          z-index: 5; align-items: center; justify-content: center; font-size: 20px; color: var(--accent); }
+  body.dragging #drop { display: flex; }
+  /* alphaTab cursor and selection */
+  .at-cursor-bar { background: rgba(255, 230, 120, .25); }
+  .at-cursor-beat { background: var(--cursor); width: 3px; }
+  .at-selection div { background: var(--sel); }
+  .at-highlight * { fill: var(--accent); stroke: var(--accent); }
+  @media (max-width: 600px) {
+    header { padding: 6px 8px; gap: 6px; }
+    input[type=range] { width: 80px; }
+    .hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="grp">
+    <select id="song" title="Song"></select>
+    <button id="open" title="Open a Guitar Pro file from this device">Open file</button>
+    <input id="file" type="file" accept=".gp,.gpx,.gp3,.gp4,.gp5,.gp7,.gp8,.mxl,.musicxml,.xml,.tex,.atex" hidden>
+  </div>
+  <div class="grp">
+    <select id="track" title="Track"></select>
+  </div>
+  <div class="grp">
+    <button id="play" class="primary" disabled>Play</button>
+    <button id="stop" disabled title="Back to start">Stop</button>
+    <span id="time">0:00 / 0:00</span>
+  </div>
+  <div class="grp">
+    <label for="speed">Speed</label>
+    <input id="speed" type="range" min="25" max="150" step="5" value="100">
+    <span id="speedVal">100%</span>
+  </div>
+  <div class="grp">
+    <label for="section">Loop</label>
+    <select id="section" title="Part to play"></select>
+    <span class="grp hide-sm" id="barsGrp">
+      <label for="from">bars</label><input id="from" type="number" min="1" value="1">
+      <label for="to">to</label><input id="to" type="number" min="1" value="1">
+    </span>
+    <button id="loop" title="Repeat the selected part">Repeat</button>
+  </div>
+  <div class="grp">
+    <button id="metro" title="Metronome click">Click</button>
+    <button id="countin" title="One bar count-in before playing">Count-in</button>
+  </div>
+  <span id="status">Loading...</span>
+</header>
+<div id="viewport"><div id="at"></div></div>
+<div id="drop">Drop a Guitar Pro file to open it</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.9.0/dist/alphaTab.js"></script>
+<script>
+(() => {
+  const CDN = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.9.0/dist/';
+  const q = new URLSearchParams(location.search);
+  const $ = id => document.getElementById(id);
+  const ui = {
+    song: $('song'), open: $('open'), file: $('file'), track: $('track'), play: $('play'), stop: $('stop'),
+    time: $('time'), speed: $('speed'), speedVal: $('speedVal'), section: $('section'), from: $('from'),
+    to: $('to'), loop: $('loop'), metro: $('metro'), countin: $('countin'), status: $('status')
+  };
+  const status = t => ui.status.textContent = t || '';
+  const fmt = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+
+  const api = new alphaTab.AlphaTabApi($('at'), {
+    core: { fontDirectory: CDN + 'font/', engine: 'svg' },
+    display: {
+      layoutMode: q.get('layout') === 'horizontal' ? alphaTab.LayoutMode.Horizontal : alphaTab.LayoutMode.Page,
+      scale: parseFloat(q.get('scale')) || (innerWidth < 600 ? 0.8 : 1),
+      // ?view=tab shows tab only, ?view=score notation only; default both
+      staveProfile: q.get('view') === 'tab' ? alphaTab.StaveProfile.Tab
+                  : q.get('view') === 'score' ? alphaTab.StaveProfile.Score : alphaTab.StaveProfile.Default
+    },
+    notation: {
+      elements: { scoreTitle: true, scoreWordsAndMusic: false, effectTempo: true },
+      // in tab-only view, draw rhythm stems under the tab so the timing is still visible
+      rhythmMode: q.get('view') === 'tab' ? alphaTab.TabRhythmMode.ShowWithBars : alphaTab.TabRhythmMode.Automatic
+    },
+    player: {
+      playerMode: alphaTab.PlayerMode.EnabledSynthesizer,
+      soundFont: CDN + 'soundfont/sonivox.sf2',
+      scrollElement: $('viewport'),
+      scrollOffsetY: -40,
+      enableCursor: true,
+      enableAnimatedBeatCursor: true,
+      enableUserInteraction: true
+    }
+  });
+
+  let score = null, firstLoad = true, playerReady = false;
+
+  // ---------- songs ----------
+  const base = new URL('songs/', location.href);
+  let songs = [];
+  function addSongOption(value, label) {
+    const o = document.createElement('option'); o.value = value; o.textContent = label; ui.song.appendChild(o); return o;
+  }
+  async function init() {
+    try { songs = await (await fetch(base + 'songs.json', { cache: 'no-cache' })).json(); } catch (e) { songs = []; }
+    songs.forEach(s => addSongOption(s.id, s.title));
+    const fileParam = q.get('file');
+    if (fileParam) {
+      const o = addSongOption('__url', fileParam.split('/').pop()); ui.song.value = '__url';
+      load(new URL(fileParam, location.href).href);
+    } else {
+      const want = q.get('song') || (songs[0] && songs[0].id);
+      const s = songs.find(x => x.id === want) || songs[0];
+      if (s) { ui.song.value = s.id; load(new URL(s.file, base).href); }
+      else status('No songs listed. Open a Guitar Pro file.');
+    }
+  }
+  ui.song.addEventListener('change', () => {
+    const s = songs.find(x => x.id === ui.song.value);
+    if (s) { firstLoad = false; load(new URL(s.file, base).href); }
+  });
+
+  async function load(src) {
+    status('Loading tab...');
+    try {
+      if (typeof src === 'string') {
+        const r = await fetch(src);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        src = new Uint8Array(await r.arrayBuffer());
+      }
+      api.load(src);
+    } catch (e) { status('Could not load that file (' + e.message + ').'); }
+  }
+
+  // local files: picker and drag-and-drop
+  ui.open.addEventListener('click', () => ui.file.click());
+  ui.file.addEventListener('change', () => { if (ui.file.files[0]) openLocal(ui.file.files[0]); ui.file.value = ''; });
+  function openLocal(f) {
+    firstLoad = false;
+    const r = new FileReader();
+    r.onload = () => {
+      let o = [...ui.song.options].find(x => x.value === '__local') || addSongOption('__local', '');
+      o.textContent = f.name; ui.song.value = '__local';
+      api.load(new Uint8Array(r.result));
+    };
+    r.readAsArrayBuffer(f);
+  }
+  let dragDepth = 0;
+  addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+  addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); } });
+  addEventListener('dragover', e => e.preventDefault());
+  addEventListener('drop', e => {
+    e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+    if (e.dataTransfer.files[0]) openLocal(e.dataTransfer.files[0]);
+  });
+
+  // ---------- score loaded ----------
+  api.scoreLoaded.on(s => {
+    score = s;
+    ui.track.innerHTML = '';
+    s.tracks.forEach((t, i) => { const o = document.createElement('option'); o.value = i; o.textContent = t.name || ('Track ' + (i + 1)); ui.track.appendChild(o); });
+    ui.section.innerHTML = '';
+    const add = (v, l) => { const o = document.createElement('option'); o.value = v; o.textContent = l; ui.section.appendChild(o); };
+    add('all', 'Whole song');
+    s.masterBars.forEach((mb, i) => { if (mb.section) add('s' + i, (mb.section.text || mb.section.marker || 'Section') + ' (bar ' + (i + 1) + ')'); });
+    add('bars', 'Bars...');
+    ui.from.max = ui.to.max = s.masterBars.length;
+    ui.from.value = 1; ui.to.value = s.masterBars.length;
+
+    let t = 0;
+    if (firstLoad && q.has('track')) t = Math.min(s.tracks.length - 1, Math.max(0, (parseInt(q.get('track')) || 1) - 1));
+    ui.track.value = t;
+    api.renderTracks([s.tracks[t]]);
+
+    if (firstLoad) {
+      if (q.get('section')) {
+        const want = q.get('section').toLowerCase();
+        const opt = [...ui.section.options].find(o => o.value.startsWith('s') && o.textContent.toLowerCase().startsWith(want));
+        if (opt) ui.section.value = opt.value;
+      }
+      const bars = (q.get('bars') || '').match(/^(\d+)-(\d+)$/);
+      if (bars) { ui.section.value = 'bars'; ui.from.value = bars[1]; ui.to.value = bars[2]; }
+      if (q.get('loop') === '1') setLoop(true);
+    } else {
+      ui.section.value = 'all';
+    }
+    applyRange();
+  });
+
+  ui.track.addEventListener('change', () => { if (score) api.renderTracks([score.tracks[+ui.track.value]]); });
+
+  // ---------- part / loop ----------
+  function barRange() {
+    if (!score) return null;
+    const n = score.masterBars.length, v = ui.section.value;
+    if (v === 'all') return null;
+    if (v === 'bars') {
+      let a = Math.min(n, Math.max(1, +ui.from.value || 1)), b = Math.min(n, Math.max(a, +ui.to.value || a));
+      return [a - 1, b - 1];
+    }
+    const start = +v.slice(1);
+    let end = n - 1;
+    for (let i = start + 1; i < n; i++) if (score.masterBars[i].section) { end = i - 1; break; }
+    return [start, end];
+  }
+  function applyRange() {
+    $('barsGrp').style.display = ui.section.value === 'bars' ? '' : 'none';
+    const r = barRange();
+    if (!r) { api.playbackRange = null; if (api.clearPlaybackRangeHighlight) api.clearPlaybackRangeHighlight(); return; }
+    const a = score.masterBars[r[0]], b = score.masterBars[r[1]];
+    api.playbackRange = { startTick: a.start, endTick: b.start + b.calculateDuration() };
+    api.tickPosition = a.start;
+    highlight(r);
+  }
+  function highlight(r) {
+    if (!api.highlightPlaybackRange || !score) return;
+    try {
+      const tr = score.tracks[+ui.track.value].staves[0];
+      const firstBeat = tr.bars[r[0]].voices[0].beats[0];
+      const lastBar = tr.bars[r[1]].voices[0].beats;
+      api.highlightPlaybackRange(firstBeat, lastBar[lastBar.length - 1]);
+    } catch (e) { /* highlight is optional */ }
+  }
+  api.renderFinished.on(() => { const r = barRange(); if (r) highlight(r); });
+  // the player resets its range when it loads the song's MIDI, so set it again then
+  let inMidi = false;
+  api.midiLoaded && api.midiLoaded.on(() => { if (inMidi) return; inMidi = true; setTimeout(() => { applyRange(); inMidi = false; }, 0); });
+  ui.section.addEventListener('change', applyRange);
+  ui.from.addEventListener('change', applyRange);
+  ui.to.addEventListener('change', applyRange);
+  // a mouse selection on the tab sets a custom range
+  api.playbackRangeChanged && api.playbackRangeChanged.on(e => {
+    if (!e.playbackRange || !score) return;
+    const startBar = score.masterBars.findIndex(mb => mb.start + mb.calculateDuration() > e.playbackRange.startTick);
+    const endBar = score.masterBars.findIndex(mb => mb.start + mb.calculateDuration() >= e.playbackRange.endTick);
+    if (startBar >= 0 && endBar >= 0) {
+      const r = barRange();
+      if (!r || r[0] !== startBar || r[1] !== endBar) {
+        ui.section.value = 'bars'; ui.from.value = startBar + 1; ui.to.value = endBar + 1;
+        $('barsGrp').style.display = '';
+      }
+    }
+  });
+
+  function setLoop(on) { api.isLooping = on; ui.loop.classList.toggle('on', on); ui.loop.setAttribute('aria-pressed', on); }
+  ui.loop.addEventListener('click', () => setLoop(!api.isLooping));
+
+  // ---------- transport ----------
+  ui.play.addEventListener('click', () => api.playPause());
+  ui.stop.addEventListener('click', () => { api.stop(); const r = barRange(); if (r) api.tickPosition = score.masterBars[r[0]].start; });
+  api.playerReady.on(() => { playerReady = true; ui.play.disabled = ui.stop.disabled = false; status(''); });
+  api.soundFontLoad && api.soundFontLoad.on(e => { if (!playerReady) status('Loading sounds ' + Math.floor(e.loaded / e.total * 100) + '%'); });
+  api.playerStateChanged.on(e => { ui.play.textContent = e.state === 1 ? 'Pause' : 'Play'; });
+  let lastSec = -1;
+  api.playerPositionChanged.on(e => {
+    const sec = Math.floor(e.currentTime / 1000);
+    if (sec !== lastSec) { lastSec = sec; ui.time.textContent = fmt(e.currentTime) + ' / ' + fmt(e.endTime); }
+  });
+  addEventListener('keydown', e => {
+    if (e.code === 'Space' && !/INPUT|SELECT|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); if (playerReady) api.playPause(); }
+  });
+
+  function setSpeed(p) {
+    p = Math.min(150, Math.max(25, p)); ui.speed.value = p; ui.speedVal.textContent = p + '%'; api.playbackSpeed = p / 100;
+  }
+  ui.speed.addEventListener('input', () => setSpeed(+ui.speed.value));
+  setSpeed(parseInt(q.get('speed')) || 100);
+
+  function toggle(btn, on, apply) { btn.classList.toggle('on', on); btn.setAttribute('aria-pressed', on); apply(on); }
+  let metroOn = q.get('metronome') === '1', countOn = q.get('countin') === '1';
+  const metro = on => toggle(ui.metro, on, v => api.metronomeVolume = v ? 1 : 0);
+  const countin = on => toggle(ui.countin, on, v => api.countInVolume = v ? 1 : 0);
+  ui.metro.addEventListener('click', () => metro(metroOn = !metroOn));
+  ui.countin.addEventListener('click', () => countin(countOn = !countOn));
+  metro(metroOn); countin(countOn);
+
+  api.error && api.error.on(e => status('Error: ' + (e && e.message ? e.message : e)));
+  init();
+})();
+</script>
+</body>
+</html>
