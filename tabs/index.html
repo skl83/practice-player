@@ -126,7 +126,7 @@
 
   // ---------- songs ----------
   const base = new URL('songs/', location.href);
-  let songs = [];
+  let songs = [], defaultTrack = 1;
   function addSongOption(value, label) {
     const o = document.createElement('option'); o.value = value; o.textContent = label; ui.song.appendChild(o); return o;
   }
@@ -140,17 +140,28 @@
     } else {
       const want = q.get('song') || (songs[0] && songs[0].id);
       const s = songs.find(x => x.id === want) || songs[0];
-      if (s) { ui.song.value = s.id; load(new URL(s.file, base).href); }
+      if (s) { ui.song.value = s.id; defaultTrack = s.track || 1; load(new URL(s.file, base).href); }
       else status('No songs listed. Open a Guitar Pro file.');
     }
   }
   ui.song.addEventListener('change', () => {
     const s = songs.find(x => x.id === ui.song.value);
-    if (s) { firstLoad = false; load(new URL(s.file, base).href); }
+    if (s) { firstLoad = false; defaultTrack = s.track || 1; load(new URL(s.file, base).href); }
   });
 
+  // stop the old song and drop its loop highlight; leaving them in place breaks the cursor on the new song
+  function resetForNewSong() {
+    if (playerReady) api.stop();
+    api.playbackRange = null;
+    if (api.clearPlaybackRangeHighlight) api.clearPlaybackRangeHighlight();
+    // alphaTab 1.9.0 keeps the old song's selected beats and redraws them after the next render,
+    // which throws because those beats are not in the new song. Forget them here.
+    api._selectionStart = undefined; api._selectionEnd = undefined;
+    ui.time.textContent = '0:00 / 0:00';
+  }
   async function load(src) {
     status('Loading tab...');
+    resetForNewSong();
     try {
       if (typeof src === 'string') {
         const r = await fetch(src);
@@ -163,11 +174,12 @@
 
   // local files: picker and drag-and-drop
   ui.open.addEventListener('click', () => ui.file.click());
-  ui.file.addEventListener('change', () => { if (ui.file.files[0]) openLocal(ui.file.files[0]); ui.file.value = ''; });
+  ui.file.addEventListener('change', () => { defaultTrack = 1; if (ui.file.files[0]) openLocal(ui.file.files[0]); ui.file.value = ''; });
   function openLocal(f) {
     firstLoad = false;
     const r = new FileReader();
     r.onload = () => {
+      resetForNewSong();
       let o = [...ui.song.options].find(x => x.value === '__local') || addSongOption('__local', '');
       o.textContent = f.name; ui.song.value = '__local';
       api.load(new Uint8Array(r.result));
@@ -196,7 +208,8 @@
     ui.from.max = ui.to.max = s.masterBars.length;
     ui.from.value = 1; ui.to.value = s.masterBars.length;
 
-    let t = 0;
+    // songs.json can name the track to show first (1-based); ?track= overrides it
+    let t = Math.min(s.tracks.length - 1, Math.max(0, defaultTrack - 1));
     if (firstLoad && q.has('track')) t = Math.min(s.tracks.length - 1, Math.max(0, (parseInt(q.get('track')) || 1) - 1));
     ui.track.value = t;
     api.renderTracks([s.tracks[t]]);
